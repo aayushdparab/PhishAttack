@@ -9,7 +9,6 @@ from pathlib import Path
 from PIL import Image
 import easyocr
 import cv2
-from pyzbar.pyzbar import decode as zbar_decode
 
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
@@ -34,10 +33,20 @@ def ocr_image(pil_image):
 
 def decode_qr(pil_img):
     arr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    codes = []
-    for d in zbar_decode(arr):
-        codes.append(d.data.decode("utf-8", errors="ignore"))
-    return codes
+    detector = cv2.QRCodeDetector()
+    try:
+        decoded_texts, points, _ = detector.detectAndDecodeMulti(arr)
+        results = []
+        if isinstance(decoded_texts, (list, tuple)) and decoded_texts:
+            for t in decoded_texts:
+                if t:
+                    results.append(t)
+        elif isinstance(decoded_texts, str) and decoded_texts:
+            results.append(decoded_texts)
+        return results
+    except:
+        text, points, _ = detector.detectAndDecode(arr)
+        return [text] if text else []
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR.parent / "models" / "phishing_detector.pkl"
