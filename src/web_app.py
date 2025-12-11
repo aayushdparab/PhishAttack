@@ -24,7 +24,11 @@ def url_features(urls):
         len(set(urlparse(u).netloc for u in urls if "://" in u or u.startswith("www.")))
     ]
 
-ocr_reader = easyocr.Reader(["en"], gpu=False)
+@st.cache_resource
+def get_ocr_reader():
+    return easyocr.Reader(["en"], gpu=False)
+
+ocr_reader = get_ocr_reader()
 
 def ocr_image(pil_image):
     img_np = np.array(pil_image)
@@ -44,35 +48,100 @@ def decode_qr(pil_img):
         elif isinstance(decoded_texts, str) and decoded_texts:
             results.append(decoded_texts)
         return results
-    except:
-        text, points, _ = detector.detectAndDecode(arr)
-        return [text] if text else []
+    except Exception:
+        try:
+            text, points, _ = detector.detectAndDecode(arr)
+            return [text] if text else []
+        except Exception:
+            return []
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR.parent / "models" / "phishing_detector.pkl"
-VECT_PATH = BASE_DIR.parent / "models" / "vectorizer.pkl"
+MODEL_DIR = BASE_DIR.parent / "models"
+MODEL_PATH = MODEL_DIR / "phishing_detector.pkl"
+VECT_PATH = MODEL_DIR / "vectorizer.pkl"
 
-with open(MODEL_PATH, "rb") as f:
-    model = pickle.load(f)
+model = None
+vectorizer = None
+loaded_from = None
 
-with open(VECT_PATH, "rb") as f:
-    vectorizer = pickle.load(f)
+def try_load_models():
+    global model, vectorizer, loaded_from
+    possible = [
+        MODEL_DIR,
+        BASE_DIR / "models",
+        Path.cwd() / "models",
+        Path.home() / "models"
+    ]
+    for base in possible:
+        mp = (base / "phishing_detector.pkl")
+        vp = (base / "vectorizer.pkl")
+        if mp.exists() and vp.exists():
+            try:
+                with open(mp, "rb") as f:
+                    m = pickle.load(f)
+                with open(vp, "rb") as f:
+                    v = pickle.load(f)
+            except Exception:
+                continue
+            model = m
+            vectorizer = v
+            loaded_from = str(base)
+            return
+    model = None
+    vectorizer = None
+    loaded_from = None
+
+try_load_models()
+
+if model is None or vectorizer is None:
+    st.warning("Model or vectorizer not found. Upload files or place them in a `models/` folder at repo root.")
+    col1, col2 = st.columns(2)
+    uploaded_model = col1.file_uploader("Upload phishing_detector.pkl", type=["pkl"])
+    uploaded_vect = col2.file_uploader("Upload vectorizer.pkl", type=["pkl"])
+    if uploaded_model is not None and uploaded_vect is not None:
+        try:
+            MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            with open(MODEL_PATH, "wb") as f:
+                f.write(uploaded_model.getbuffer())
+            with open(VECT_PATH, "wb") as f:
+                f.write(uploaded_vect.getbuffer())
+            try_load_models()
+            if model is not None and vectorizer is not None:
+                st.success(f"Loaded model and vectorizer from {MODEL_PATH.parent}")
+        except Exception as e:
+            st.error(f"Failed to save/load uploaded models: {e}")
+    st.stop()
+else:
+    st.success(f"Loaded model and vectorizer from {loaded_from}")
 
 def classify_text(text):
-    X_text = vectorizer.transform([text]).toarray()
+    if vectorizer is None or model is None:
+        return 0, None, []
+    try:
+        X_text = vectorizer.transform([text]).toarray()
+    except Exception:
+        X_text = np.zeros((1, 0))
     urls = extract_urls(text)
     X_urls = np.array(url_features(urls)).reshape(1, -1)
     try:
-        X = np.hstack([X_text, X_urls])
-    except:
-        X = X_text
-    pred = int(model.predict(X)[0])
+        if X_text.size and X_urls.size:
+            X = np.hstack([X_text, X_urls])
+        elif X_text.size:
+            X = X_text
+        else:
+            X = X_urls
+    except Exception:
+        X = X_text if X_text.size else X_urls
+    try:
+        pred = int(model.predict(X)[0])
+    except Exception:
+        pred = 0
     prob = None
     if hasattr(model, "predict_proba"):
         try:
             prob = float(model.predict_proba(X).max())
-        except:
-            pass
+        except Exception:
+            prob = None
     return pred, prob, urls
 
 st.title("🛡️ PhishGuard AI — Email & Screenshot Phishing Detector")
@@ -90,15 +159,17 @@ with tab1:
             st.markdown(f"### Prediction: {label}")
             if prob is not None:
                 st.write(f"**Confidence:** {prob:.2f}")
-            st.write("### Extracted URLs:")
-            for u in urls:
-                st.write("-", u)
+            if urls:
+                st.write("### Extracted URLs:")
+                for u in urls:
+                    st.write("-", u)
 
 with tab2:
     uploaded_img = st.file_uploader("Upload a screenshot of an email (.jpg, .png)", type=["jpg", "jpeg", "png"])
     if uploaded_img:
         pil_img = Image.open(uploaded_img).convert("RGB")
         st.image(pil_img, caption="Uploaded Screenshot", use_column_width=True)
+        st.write("Extracting text from image...")
         extracted_text = ocr_image(pil_img)
         st.text_area("OCR Extracted Text", extracted_text, height=200)
         qr_data = decode_qr(pil_img)
@@ -109,11 +180,12 @@ with tab2:
         pred, prob, urls = classify_text(extracted_text)
         label = "🚨 Phishing" if pred == 1 else "✅ Not Phishing"
         st.markdown(f"## Prediction: {label}")
-        if prob:
+        if prob is not None:
             st.write(f"**Confidence:** {prob:.2f}")
-        st.write("### Extracted URLs:")
-        for u in urls:
-            st.write("-", u)
+        if urls:
+            st.write("### Extracted URLs:")
+            for u in urls:
+                st.write("-", u)
 
 st.markdown("---")
 st.write("Deny the Phish Attacks!!!!")
