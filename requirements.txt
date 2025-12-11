@@ -1,6 +1,10 @@
 streamlit
 numpy==2.3.4
+pandas
 scipy
 scikit-learn>=1.4.2
-pandas
 joblib
+pillow
+easyocr
+opencv-python-headless
+pyzbar
