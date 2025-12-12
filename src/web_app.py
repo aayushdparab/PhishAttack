@@ -1,4 +1,3 @@
-# --- pyzbar stub to avoid zbar import errors on Streamlit Cloud ---
 import sys, types
 _stub = types.ModuleType("pyzbar")
 _stub_pyzbar_pyzbar = types.ModuleType("pyzbar.pyzbar")
@@ -7,7 +6,6 @@ def _dummy_decode(*args, **kwargs):
 setattr(_stub_pyzbar_pyzbar, "decode", _dummy_decode)
 sys.modules["pyzbar"] = _stub
 sys.modules["pyzbar.pyzbar"] = _stub_pyzbar_pyzbar
-# --- END STUB ---
 
 import streamlit as st
 import pickle
@@ -25,28 +23,13 @@ from datetime import datetime
 
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
-# ------ Decision thresholds (tunable) ------
-PHISH_THRESHOLD = 0.75     # p(phish) >= this -> phishing (high confidence)
-NOT_PHISH_THRESHOLD = 0.35 # p(phish) <= this -> not phishing (high confidence)
-UNCERTAIN_LOW = 0.35
-UNCERTAIN_HIGH = 0.75
+PHISH_THRESHOLD = 0.60
+NOT_PHISH_THRESHOLD = 0.30
+UNCERTAIN_LOW = NOT_PHISH_THRESHOLD
+UNCERTAIN_HIGH = PHISH_THRESHOLD
+MODEL_WEIGHT = 0.80
+HEUR_WEIGHT = 1.0 - MODEL_WEIGHT
 
-def decide_label_from_prob(prob_phish):
-    """
-    Decide label string + certainty based on probability of class 1 (phishing).
-    Returns (label_text, certainty_tag)
-    """
-    if prob_phish is None:
-        return ("Suspect / Manual Review", "low_confidence")
-    if prob_phish >= PHISH_THRESHOLD:
-        return ("Phishing", "high_confidence")
-    if prob_phish <= NOT_PHISH_THRESHOLD:
-        return ("Not Phishing", "high_confidence")
-    if UNCERTAIN_LOW <= prob_phish <= UNCERTAIN_HIGH:
-        return ("Suspect / Manual Review", "uncertain")
-    return ("Suspect / Manual Review", "low_confidence")
-
-# ---- URL helpers ----
 def extract_urls(text):
     url_pattern = re.compile(r"https?://\S+|www\.\S+")
     return url_pattern.findall(text or "")
@@ -54,44 +37,44 @@ def extract_urls(text):
 def url_features(urls):
     return [
         len(urls),
-        int(any("verify" in u.lower() or "login" in u.lower() for u in urls)),
-        int(any(re.match(r"https?://\d+\.\d+\.\d+\.\d+", u) for u in urls)),
+        int(any("verify" in u.lower() or "login" in u.lower() or "account" in u.lower() for u in urls)),
+        int(any(re.match(r'https?://\d+\.\d+\.\d+\.\d+', u) for u in urls)),
         len(set(urlparse(u).netloc for u in urls if "://" in u or u.startswith("www.")))
     ]
 
-# ---- OCR reader (cached) ----
 @st.cache_resource
 def get_ocr_reader():
     return easyocr.Reader(["en"], gpu=False)
 ocr_reader = get_ocr_reader()
 
 def ocr_image(pil_image):
-    img_np = np.array(pil_image)
-    results = ocr_reader.readtext(img_np, detail=0)
-    return " ".join(results)
-
-# ---- QR decode (OpenCV) ----
-def decode_qr(pil_img):
-    arr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    detector = cv2.QRCodeDetector()
     try:
-        decoded_texts, points, _ = detector.detectAndDecodeMulti(arr)
-        results = []
-        if isinstance(decoded_texts, (list, tuple)) and decoded_texts:
-            for t in decoded_texts:
-                if t:
-                    results.append(t)
-        elif isinstance(decoded_texts, str) and decoded_texts:
-            results.append(decoded_texts)
-        return results
+        img_np = np.array(pil_image)
+        results = ocr_reader.readtext(img_np, detail=0)
+        return " ".join(results)
     except Exception:
+        return ""
+
+def decode_qr(pil_img):
+    try:
+        arr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        detector = cv2.QRCodeDetector()
         try:
+            decoded_texts, points, _ = detector.detectAndDecodeMulti(arr)
+            results = []
+            if isinstance(decoded_texts, (list, tuple)) and decoded_texts:
+                for t in decoded_texts:
+                    if t:
+                        results.append(t)
+            elif isinstance(decoded_texts, str) and decoded_texts:
+                results.append(decoded_texts)
+            return results
+        except Exception:
             text, points, _ = detector.detectAndDecode(arr)
             return [text] if text else []
-        except Exception:
-            return []
+    except Exception:
+        return []
 
-# ---- model loader ----
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR.parent / "models"
 MODEL_PATH = MODEL_DIR / "phishing_detector.pkl"
@@ -164,7 +147,6 @@ if model is None or vectorizer is None:
 else:
     st.success(f"Model loaded from: {loaded_from}")
 
-# ---- feedback saver ----
 def save_feedback(email_text, predicted_label, correct_label):
     data_dir = BASE_DIR.parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -183,10 +165,11 @@ def save_feedback(email_text, predicted_label, correct_label):
             writer.writeheader()
         writer.writerow(row)
 
-# ---- pad/truncate helper ----
 def pad_or_truncate(arr, target_dim):
-    if target_dim is None:
+    if target_dim is None or arr is None:
         return arr
+    if arr.size == 0:
+        return np.zeros((1, target_dim))
     cur = arr.shape[1]
     if cur == target_dim:
         return arr
@@ -196,60 +179,116 @@ def pad_or_truncate(arr, target_dim):
     else:
         return arr[:, :target_dim]
 
-# ---- classify_text: returns pred_label (by prob>=0.5), prob_phish, urls ----
+def _model_phish_probability(model_obj, X):
+    if model_obj is None:
+        return None
+    if not hasattr(model_obj, "predict_proba"):
+        return None
+    try:
+        p = model_obj.predict_proba(X)
+        classes = list(getattr(model_obj, "classes_", []))
+        if 1 in classes:
+            idx = classes.index(1)
+            return float(p[0, idx])
+        elif p.shape[1] == 2:
+            return float(p[0, 1])
+        else:
+            return float(p[0].max())
+    except Exception:
+        return None
+
+def _heuristic_score(text, urls):
+    score = 0.0
+    text_lower = (text or "").lower()
+    strong_phrases = [
+        "verify your account", "urgent action", "confirm your", "billing problem",
+        "click here to login", "account suspended", "update your payment",
+        "view confidential feedback", "view confidential", "click below", "click here",
+        "view confidential link", "view confidential message", "confirm your account"
+    ]
+    if any(p in text_lower for p in strong_phrases):
+        score += 0.40
+
+    if urls:
+        suspicious_keywords = ["verify", "login", "account-update", "secure", "password", "confirm"]
+        if any(any(k in u.lower() for k in suspicious_keywords) for u in urls):
+            score += 0.35
+        if any(re.match(r'https?://\d+\.\d+\.\d+\.\d+', u) for u in urls):
+            score += 0.25
+        domains = set(urlparse(u).netloc for u in urls if u and ("://" in u or u.startswith("www.")))
+        if len(domains) >= 3:
+            score += 0.20
+        if len(urls) > 2:
+            score += 0.10
+
+    if re.search(r"\b(view|click)\b.*\b(confidential|feedback|here|below)\b", text_lower):
+        score += 0.25
+
+    return min(score, 0.99)
+
 def classify_text(text):
     if vectorizer is None or model is None:
-        return 0, None, []
+        return 0, None, [], 0.0, None
     try:
         X_text = vectorizer.transform([text]).toarray()
     except Exception:
         X_text = np.zeros((1, 0))
     urls = extract_urls(text)
     X_urls = np.array(url_features(urls)).reshape(1, -1)
-
-    # metadata dims
     if metadata and isinstance(metadata, dict):
-        text_dim = metadata.get("text_features") or metadata.get("tfidf_max_features") or X_text.shape[1]
-        url_dim = metadata.get("url_features") or X_urls.shape[1]
+        text_dim = metadata.get("text_features", X_text.shape[1])
+        url_dim = metadata.get("url_features", X_urls.shape[1])
     else:
         text_dim = X_text.shape[1]
         url_dim = X_urls.shape[1]
-
     X_text = pad_or_truncate(X_text, text_dim)
     X_urls = pad_or_truncate(X_urls, url_dim)
-
     try:
-        X = np.hstack([X_text, X_urls])
-    except Exception:
-        X = X_text if X_text.size else X_urls
-
-    prob_phish = None
-    try:
-        if hasattr(model, "predict_proba"):
-            p = model.predict_proba(X)
-            # binary classifier: column 1 is prob of class 1
-            if p.shape[1] == 2:
-                prob_phish = float(p[0, 1])
-            else:
-                # fallback: take max or try index for label 1
-                prob_phish = float(p.max())
+        if X_text is not None and X_urls is not None and X_text.size and X_urls.size:
+            X = np.hstack([X_text, X_urls])
+        elif X_text is not None and X_text.size:
+            X = X_text
         else:
-            prob_phish = None
+            X = X_urls
     except Exception:
-        prob_phish = None
-
-    # determine pred_label consistently from prob_phish if available, else model.predict
-    if prob_phish is not None:
-        pred_label = 1 if prob_phish >= 0.5 else 0
-    else:
+        X = X_text if (X_text is not None and X_text.size) else X_urls
+    model_prob = _model_phish_probability(model, X)
+    if model_prob is None:
         try:
-            pred_label = int(model.predict(X)[0])
+            p_only = int(model.predict(X)[0])
+            model_prob = 0.99 if p_only == 1 else 0.01
         except Exception:
-            pred_label = 0
+            model_prob = None
+    heur = _heuristic_score(text, urls)
+    if heur >= 0.30:
+        combined = max(0.95, heur)
+    else:
+        if model_prob is None:
+            combined = heur
+        else:
+            combined = float(max(0.0, min(1.0, model_prob * MODEL_WEIGHT + heur * HEUR_WEIGHT)))
+    if model_prob is not None and model_prob <= 0.05 and heur <= 0.05:
+        combined = min(combined, 0.05)
+    pred_label = 1 if combined >= 0.5 else 0
+    return pred_label, model_prob, urls, float(heur), float(combined)
 
-    return pred_label, prob_phish, urls
+def decide_label_from_combined(combined_score):
+    if combined_score is None:
+        return ("Suspect / Manual Review", "low_confidence")
+    if combined_score >= PHISH_THRESHOLD:
+        return ("Phishing", "high_confidence")
+    if combined_score <= NOT_PHISH_THRESHOLD:
+        return ("Not Phishing", "high_confidence")
+    if UNCERTAIN_LOW <= combined_score <= UNCERTAIN_HIGH:
+        return ("Suspect / Manual Review", "uncertain")
+    return ("Suspect / Manual Review", "low_confidence")
 
-# ---- UI ----
+with st.sidebar:
+    st.markdown("## PhishGuard Controls")
+    show_conf = st.checkbox("Show confidence", value=True)
+    show_debug = st.checkbox("Show debug info (temp)", value=False)
+    st.markdown("---")
+
 st.title("🛡️ PhishGuard AI — Email & Screenshot Phishing Detector")
 tab1, tab2 = st.tabs(["Upload Text", "Upload Image"])
 
@@ -259,12 +298,14 @@ with tab1:
         if not email_input.strip():
             st.error("Please paste an email.")
         else:
-            pred_label, prob_phish, urls = classify_text(email_input)
-            label_text, certainty = decide_label_from_prob(prob_phish)
+            pred_label, model_prob, urls, heur, combined = classify_text(email_input)
+            label_text, certainty = decide_label_from_combined(combined)
             emoji = "🚨" if label_text.startswith("Phishing") or label_text.startswith("Suspect") else "✅"
             st.markdown(f"### Prediction: {emoji} {label_text}")
-            if prob_phish is not None:
-                st.write(f"**Model confidence (p(phish)):** {prob_phish:.2f}")
+            if show_conf:
+                st.write(f"**Model confidence (p(phish))**: {model_prob:.2f}" if model_prob is not None else "**Model confidence (p(phish))**: N/A")
+                st.write(f"**Heuristic score:** {heur:.2f}")
+                st.write(f"**Combined score:** {combined:.2f}")
             if certainty == "uncertain":
                 st.warning("⚠️ Low confidence — please review manually or provide feedback.")
             elif certainty == "low_confidence":
@@ -273,6 +314,12 @@ with tab1:
                 st.write("### Extracted URLs:")
                 for u in urls:
                     st.write("-", u)
+            if show_debug:
+                with st.expander("🔍 Debug internals (details)"):
+                    st.write("Model prob:", model_prob)
+                    st.write("Heuristic:", heur)
+                    st.write("Combined:", combined)
+                    st.write("Extracted URLs:", urls)
             st.markdown("#### Was this prediction correct?")
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -300,12 +347,14 @@ with tab2:
             st.write("### QR / Barcode Detected:")
             for x in qr_data:
                 st.write("-", x)
-        pred_label, prob_phish, urls = classify_text(extracted_text)
-        label_text, certainty = decide_label_from_prob(prob_phish)
+        pred_label, model_prob, urls, heur, combined = classify_text(extracted_text)
+        label_text, certainty = decide_label_from_combined(combined)
         emoji = "🚨" if label_text.startswith("Phishing") or label_text.startswith("Suspect") else "✅"
         st.markdown(f"## Prediction: {emoji} {label_text}")
-        if prob_phish is not None:
-            st.write(f"**Model confidence (p(phish)):** {prob_phish:.2f}")
+        if show_conf:
+            st.write(f"**Model confidence (p(phish))**: {model_prob:.2f}" if model_prob is not None else "**Model confidence (p(phish))**: N/A")
+            st.write(f"**Heuristic score:** {heur:.2f}")
+            st.write(f"**Combined score:** {combined:.2f}")
         if certainty == "uncertain":
             st.warning("⚠️ Low confidence — OCR may be noisy. Please verify the extracted text above and/or submit feedback.")
         elif certainty == "low_confidence":
@@ -314,6 +363,12 @@ with tab2:
             st.write("### Extracted URLs:")
             for u in urls:
                 st.write("-", u)
+        if show_debug:
+            with st.expander("🔍 Debug internals (details)", expanded=True):
+                st.write("Model prob:", model_prob)
+                st.write("Heuristic:", heur)
+                st.write("Combined:", combined)
+                st.write("Extracted URLs:", urls)
         st.markdown("#### Was this prediction correct?")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -331,4 +386,7 @@ with tab2:
 
 st.markdown("---")
 st.write("Deny the Phish Attacks!!!!")
+
+
+
 
