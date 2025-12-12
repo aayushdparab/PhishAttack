@@ -1,3 +1,4 @@
+
 import sys, types
 _stub = types.ModuleType("pyzbar")
 _stub_pyzbar_pyzbar = types.ModuleType("pyzbar.pyzbar")
@@ -23,19 +24,25 @@ from datetime import datetime
 
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
-PHISH_THRESHOLD = 0.65
-UNCERTAIN_LOW = 0.45
-UNCERTAIN_HIGH = 0.75
+PHISH_THRESHOLD = 0.60     
+NOT_PHISH_THRESHOLD = 0.40 
+UNCERTAIN_LOW = 0.35
+UNCERTAIN_HIGH = 0.65
 
-def decide_label(pred, prob):
-    if prob is None:
-        return ("Phishing" if pred == 1 else "Not Phishing", "low_confidence")
-    phish_prob = prob if pred == 1 else 1 - prob
-    if phish_prob >= PHISH_THRESHOLD:
+def decide_label_from_prob(prob_phish):
+    """
+    Decide label string + certainty based on probability of class 1 (phishing).
+    Returns (label_text, certainty_tag)
+    """
+    if prob_phish is None:
+        return ("Suspect / Manual Review", "low_confidence")
+    if prob_phish >= PHISH_THRESHOLD:
         return ("Phishing", "high_confidence")
-    if UNCERTAIN_LOW <= phish_prob <= UNCERTAIN_HIGH:
+    if prob_phish <= NOT_PHISH_THRESHOLD:
+        return ("Not Phishing", "high_confidence")
+    if UNCERTAIN_LOW <= prob_phish <= UNCERTAIN_HIGH:
         return ("Suspect / Manual Review", "uncertain")
-    return ("Phishing" if pred == 1 else "Not Phishing", "low_confidence")
+    return ("Suspect / Manual Review", "low_confidence")
 
 def extract_urls(text):
     url_pattern = re.compile(r"https?://\S+|www\.\S+")
@@ -99,9 +106,9 @@ def try_load_models():
         Path.home() / "models"
     ]
     for base in possible:
-        mp = (base / "phishing_detector.pkl")
-        vp = (base / "vectorizer.pkl")
-        mep = (base / "metadata.pkl")
+        mp = base / "phishing_detector.pkl"
+        vp = base / "vectorizer.pkl"
+        mep = base / "metadata.pkl"
         if mp.exists() and vp.exists():
             try:
                 with open(mp, "rb") as f:
@@ -206,24 +213,31 @@ def classify_text(text):
     except Exception:
         X = X_text if X_text.size else X_urls
 
+    prob_phish = None
     try:
-        pred = int(model.predict(X)[0])
-    except Exception:
-        pred = 0
-    prob = None
-    if hasattr(model, "predict_proba"):
-        try:
+        if hasattr(model, "predict_proba"):
             p = model.predict_proba(X)
             if p.shape[1] == 2:
-                prob = float(p[:, 1].max())
+                prob_phish = float(p[0, 1])
             else:
-                prob = float(p.max())
+                prob_phish = float(p.max())
+        else:
+            prob_phish = None
+    except Exception:
+        prob_phish = None
+
+    if prob_phish is not None:
+        pred_label = 1 if prob_phish >= 0.5 else 0
+    else:
+        try:
+            pred_label = int(model.predict(X)[0])
         except Exception:
-            prob = None
-    return pred, prob, urls
+            pred_label = 0
+
+    return pred_label, prob_phish, urls
 
 st.title("🛡️ PhishGuard AI — Email & Screenshot Phishing Detector")
-tab1, tab2 = st.tabs(["📄 Text Email", "🖼️ Screenshot Image"])
+tab1, tab2 = st.tabs(["Upload Text", "Upload Image"])
 
 with tab1:
     email_input = st.text_area("Paste an email here:", height=250)
@@ -231,12 +245,12 @@ with tab1:
         if not email_input.strip():
             st.error("Please paste an email.")
         else:
-            pred, prob, urls = classify_text(email_input)
-            label_text, certainty = decide_label(pred, prob)
+            pred_label, prob_phish, urls = classify_text(email_input)
+            label_text, certainty = decide_label_from_prob(prob_phish)
             emoji = "🚨" if label_text.startswith("Phishing") or label_text.startswith("Suspect") else "✅"
             st.markdown(f"### Prediction: {emoji} {label_text}")
-            if prob is not None:
-                st.write(f"**Model confidence:** {prob:.2f}")
+            if prob_phish is not None:
+                st.write(f"**Model confidence (p(phish)):** {prob_phish:.2f}")
             if certainty == "uncertain":
                 st.warning("⚠️ Low confidence — please review manually or provide feedback.")
             elif certainty == "low_confidence":
@@ -249,15 +263,15 @@ with tab1:
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("✅ Correct (Text)"):
-                    save_feedback(email_input, pred, pred)
+                    save_feedback(email_input, pred_label, pred_label)
                     st.success("Thanks — feedback saved.")
             with col2:
                 if st.button("🚨 Incorrect: This WAS phishing (Text)"):
-                    save_feedback(email_input, pred, 1)
+                    save_feedback(email_input, pred_label, 1)
                     st.success("Thanks — feedback saved.")
             with col3:
                 if st.button("✅ Incorrect: This WAS NOT phishing (Text)"):
-                    save_feedback(email_input, pred, 0)
+                    save_feedback(email_input, pred_label, 0)
                     st.success("Thanks — feedback saved.")
 
 with tab2:
@@ -272,12 +286,12 @@ with tab2:
             st.write("### QR / Barcode Detected:")
             for x in qr_data:
                 st.write("-", x)
-        pred, prob, urls = classify_text(extracted_text)
-        label_text, certainty = decide_label(pred, prob)
+        pred_label, prob_phish, urls = classify_text(extracted_text)
+        label_text, certainty = decide_label_from_prob(prob_phish)
         emoji = "🚨" if label_text.startswith("Phishing") or label_text.startswith("Suspect") else "✅"
         st.markdown(f"## Prediction: {emoji} {label_text}")
-        if prob is not None:
-            st.write(f"**Model confidence:** {prob:.2f}")
+        if prob_phish is not None:
+            st.write(f"**Model confidence (p(phish)):** {prob_phish:.2f}")
         if certainty == "uncertain":
             st.warning("⚠️ Low confidence — OCR may be noisy. Please verify the extracted text above and/or submit feedback.")
         elif certainty == "low_confidence":
@@ -290,15 +304,15 @@ with tab2:
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("✅ Correct (Image)"):
-                save_feedback(extracted_text, pred, pred)
+                save_feedback(extracted_text, pred_label, pred_label)
                 st.success("Thanks — feedback saved.")
         with col2:
             if st.button("🚨 Incorrect: This WAS phishing (Image)"):
-                save_feedback(extracted_text, pred, 1)
+                save_feedback(extracted_text, pred_label, 1)
                 st.success("Thanks — feedback saved.")
         with col3:
             if st.button("✅ Incorrect: This WAS NOT phishing (Image)"):
-                save_feedback(extracted_text, pred, 0)
+                save_feedback(extracted_text, pred_label, 0)
                 st.success("Thanks — feedback saved.")
 
 st.markdown("---")
