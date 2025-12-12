@@ -17,23 +17,20 @@ import pandas as pd
 import os
 from pathlib import Path
 from PIL import Image
-import easyocr
 import cv2
+import requests
 import csv
 from datetime import datetime
+import io
 
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
-PHISH_THRESHOLD = 0.75 
-NOT_PHISH_THRESHOLD = 0.35
+PHISH_THRESHOLD = 0.60
+NOT_PHISH_THRESHOLD = 0.40
 UNCERTAIN_LOW = 0.35
-UNCERTAIN_HIGH = 0.75
+UNCERTAIN_HIGH = 0.65
 
 def decide_label_from_prob(prob_phish):
-    """
-    Decide label string + certainty based on probability of class 1 (phishing).
-    Returns (label_text, certainty_tag)
-    """
     if prob_phish is None:
         return ("Suspect / Manual Review", "low_confidence")
     if prob_phish >= PHISH_THRESHOLD:
@@ -56,15 +53,39 @@ def url_features(urls):
         len(set(urlparse(u).netloc for u in urls if "://" in u or u.startswith("www.")))
     ]
 
-@st.cache_resource
-def get_ocr_reader():
-    return easyocr.Reader(["en"], gpu=False)
-ocr_reader = get_ocr_reader()
+OCR_API_KEY = None
+try:
+    OCR_API_KEY = st.secrets.get("OCR_API_KEY", None)
+except Exception:
+    OCR_API_KEY = None
 
-def ocr_image(pil_image):
-    img_np = np.array(pil_image)
-    results = ocr_reader.readtext(img_np, detail=0)
-    return " ".join(results)
+def ocr_image(pil_img):
+    """
+    Use OCR.space API to extract text from PIL image.
+    Requires OCR_API_KEY stored in Streamlit secrets or as environment var OCR_API_KEY.
+    Falls back to empty string if API key missing or call fails.
+    """
+    key = OCR_API_KEY or os.environ.get("OCR_API_KEY", None) or "helloworld"
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    buf.seek(0)
+    url = "https://api.ocr.space/parse/image"
+    payload = {
+        "apikey": key,
+        "language": "eng",
+        "OCREngine": 2,
+    }
+    files = {"filename": ("image.png", buf, "image/png")}
+    try:
+        resp = requests.post(url, data=payload, files=files, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        parsed = data.get("ParsedResults")
+        if parsed and isinstance(parsed, list) and parsed[0].get("ParsedText"):
+            return parsed[0]["ParsedText"]
+        return ""
+    except Exception:
+        return ""
 
 def decode_qr(pil_img):
     arr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
@@ -86,6 +107,9 @@ def decode_qr(pil_img):
         except Exception:
             return []
 
+# ---------------------------
+# Model loader & paths
+# ---------------------------
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR.parent / "models"
 MODEL_PATH = MODEL_DIR / "phishing_detector.pkl"
@@ -137,7 +161,7 @@ def try_load_models():
 try_load_models()
 
 if model is None or vectorizer is None:
-    st.warning("Model or vectorizer not found. Upload them below or put them in `models/` at repo root.")
+    st.warning("Model or vectorizer not found. Upload them below or place them in `models/` at repo root.")
     col1, col2 = st.columns(2)
     up_m = col1.file_uploader("Upload phishing_detector.pkl", type=["pkl"])
     up_v = col2.file_uploader("Upload vectorizer.pkl", type=["pkl"])
@@ -217,12 +241,21 @@ def classify_text(text):
     try:
         if hasattr(model, "predict_proba"):
             p = model.predict_proba(X)
-            if p.shape[1] == 2:
-                prob_phish = float(p[0, 1])
+            if hasattr(model, "classes_") and model.classes_ is not None:
+                classes = list(model.classes_)
+                if 1 in classes:
+                    idx = classes.index(1)
+                    prob_phish = float(p[0, idx])
+                else:
+                    if p.shape[1] == 2:
+                        prob_phish = float(p[0, 1])
+                    else:
+                        prob_phish = float(p[0].max())
             else:
-                prob_phish = float(p.max())
-        else:
-            prob_phish = None
+                if p.shape[1] == 2:
+                    prob_phish = float(p[0, 1])
+                else:
+                    prob_phish = float(p[0].max())
     except Exception:
         prob_phish = None
 
@@ -280,6 +313,8 @@ with tab2:
         pil_img = Image.open(uploaded_img).convert("RGB")
         st.image(pil_img, caption="Uploaded Screenshot", use_column_width=True)
         extracted_text = ocr_image(pil_img)
+        if not extracted_text:
+            st.warning("OCR returned no text — either OCR API key missing or OCR failed. For cloud, set OCR_API_KEY in Streamlit Secrets.")
         st.text_area("OCR Extracted Text", extracted_text, height=200)
         qr_data = decode_qr(pil_img)
         if qr_data:
@@ -317,7 +352,3 @@ with tab2:
 
 st.markdown("---")
 st.write("Deny the Phish Attacks!!!!")
-
-
-
-
