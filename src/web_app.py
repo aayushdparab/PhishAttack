@@ -1,4 +1,3 @@
-# --- pyzbar stub to avoid zbar import errors on Streamlit Cloud ---
 import sys, types
 _stub = types.ModuleType("pyzbar")
 _stub_pyzbar_pyzbar = types.ModuleType("pyzbar.pyzbar")
@@ -7,7 +6,6 @@ def _dummy_decode(*args, **kwargs):
 setattr(_stub_pyzbar_pyzbar, "decode", _dummy_decode)
 sys.modules["pyzbar"] = _stub
 sys.modules["pyzbar.pyzbar"] = _stub_pyzbar_pyzbar
-# --- END STUB ---
 
 import streamlit as st
 import pickle
@@ -25,7 +23,6 @@ from datetime import datetime
 
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
-# ---- thresholds (stricter) ----
 PHISH_THRESHOLD = 0.65
 UNCERTAIN_LOW = 0.45
 UNCERTAIN_HIGH = 0.75
@@ -40,7 +37,6 @@ def decide_label(pred, prob):
         return ("Suspect / Manual Review", "uncertain")
     return ("Phishing" if pred == 1 else "Not Phishing", "low_confidence")
 
-# ---- URL helpers ----
 def extract_urls(text):
     url_pattern = re.compile(r"https?://\S+|www\.\S+")
     return url_pattern.findall(text or "")
@@ -53,7 +49,6 @@ def url_features(urls):
         len(set(urlparse(u).netloc for u in urls if "://" in u or u.startswith("www.")))
     ]
 
-# ---- OCR ----
 @st.cache_resource
 def get_ocr_reader():
     return easyocr.Reader(["en"], gpu=False)
@@ -64,7 +59,6 @@ def ocr_image(pil_image):
     results = ocr_reader.readtext(img_np, detail=0)
     return " ".join(results)
 
-# ---- QR decode with OpenCV ----
 def decode_qr(pil_img):
     arr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     detector = cv2.QRCodeDetector()
@@ -85,7 +79,6 @@ def decode_qr(pil_img):
         except Exception:
             return []
 
-# ---- model + vectorizer + metadata loader ----
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR.parent / "models"
 MODEL_PATH = MODEL_DIR / "phishing_detector.pkl"
@@ -158,7 +151,6 @@ if model is None or vectorizer is None:
 else:
     st.success(f"Model loaded from: {loaded_from}")
 
-# ---- feedback saver ----
 def save_feedback(email_text, predicted_label, correct_label):
     data_dir = BASE_DIR.parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -177,9 +169,7 @@ def save_feedback(email_text, predicted_label, correct_label):
             writer.writeheader()
         writer.writerow(row)
 
-# ---- classify_text: pad/truncate to metadata dims ----
 def pad_or_truncate(arr, target_dim):
-    # arr is 2D numpy array (1, D)
     if target_dim is None:
         return arr
     cur = arr.shape[1]
@@ -201,7 +191,6 @@ def classify_text(text):
     urls = extract_urls(text)
     X_urls = np.array(url_features(urls)).reshape(1, -1)
 
-    # use metadata to ensure shapes match
     if metadata and isinstance(metadata, dict):
         text_dim = metadata.get("text_features") or metadata.get("tfidf_max_features") or X_text.shape[1]
         url_dim = metadata.get("url_features") or X_urls.shape[1]
@@ -209,7 +198,6 @@ def classify_text(text):
         text_dim = X_text.shape[1]
         url_dim = X_urls.shape[1]
 
-    # pad/truncate
     X_text = pad_or_truncate(X_text, text_dim)
     X_urls = pad_or_truncate(X_urls, url_dim)
 
@@ -225,7 +213,6 @@ def classify_text(text):
     prob = None
     if hasattr(model, "predict_proba"):
         try:
-            # if predict_proba gives two columns, take probability of class 1
             p = model.predict_proba(X)
             if p.shape[1] == 2:
                 prob = float(p[:, 1].max())
@@ -235,7 +222,6 @@ def classify_text(text):
             prob = None
     return pred, prob, urls
 
-# ---- UI ----
 st.title("🛡️ PhishGuard AI — Email & Screenshot Phishing Detector")
 tab1, tab2 = st.tabs(["📄 Text Email", "🖼️ Screenshot Image"])
 

@@ -1,4 +1,3 @@
-# train.py
 import pickle
 import numpy as np
 import pandas as pd
@@ -11,9 +10,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-# -------------------------
-# URL utilities (same as web app)
-# -------------------------
 def extract_urls(text):
     url_pattern = re.compile(r'https?://\S+|www\.\S+')
     return url_pattern.findall(text or "")
@@ -26,9 +22,6 @@ def url_features(urls):
         len(set(urlparse(u).netloc for u in urls if "://" in u or u.startswith("www."))),
     ]
 
-# -------------------------
-# Main training function
-# -------------------------
 def train_model(raw_data_file="data/phishing_emails.csv",
                 model_file="models/phishing_detector.pkl",
                 vectorizer_file="models/vectorizer.pkl",
@@ -52,18 +45,14 @@ def train_model(raw_data_file="data/phishing_emails.csv",
     texts = df['email_content'].astype(str).tolist()
     labels = df['label'].astype(int).values
 
-    # Fit TF-IDF vectorizer on training texts
-    vectorizer = TfidfVectorizer(max_features=None)  # None => full vocab
+    vectorizer = TfidfVectorizer(max_features=None)
     X_text = vectorizer.fit_transform(texts).toarray()
 
-    # Compute URL features for each training example
     url_feat_list = [url_features(extract_urls(t)) for t in texts]
-    X_urls = np.array(url_feat_list)  # shape (n_samples, 4)
+    X_urls = np.array(url_feat_list)
 
-    # Combine
     X = np.hstack([X_text, X_urls])
 
-    # Merge feedback data (if available) to augment training set
     feedback_path = Path(feedback_file)
     if feedback_path.exists():
         try:
@@ -81,20 +70,16 @@ def train_model(raw_data_file="data/phishing_emails.csv",
         except Exception as e:
             print("Warning: could not read feedback file:", e)
 
-    # Train/test split
     X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=test_size, random_state=random_state, stratify=labels)
 
-    # Train model
     clf = RandomForestClassifier(n_estimators=200, random_state=random_state)
     clf.fit(X_train, y_train)
 
-    # Evaluation
     y_pred = clf.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
     print(f"Validation accuracy: {acc:.4f}")
     print(classification_report(y_test, y_pred))
 
-    # Save model and vectorizer
     os.makedirs(os.path.dirname(model_file), exist_ok=True)
     os.makedirs(os.path.dirname(vectorizer_file), exist_ok=True)
 

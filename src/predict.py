@@ -37,13 +37,11 @@ def predict_email(model_file="models/phishing_detector.pkl", vectorizer_file="mo
     try:
         X = np.hstack([X_text, X_urls])
     except Exception:
-        # if model was saved without URL features (unlikely after using train.py), fallback
         X = X_text
 
     pred = model.predict(X)[0]
     label = "Phishing" if pred == 1 else "Not Phishing"
 
-    # Append to feedback log with no correct_label (can be corrected later)
     row = {"email_content": email_text, "predicted_label": int(pred), "correct_label": None}
     os.makedirs(os.path.dirname(feedback_file), exist_ok=True)
     if os.path.exists(feedback_file):
