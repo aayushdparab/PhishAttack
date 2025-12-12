@@ -24,10 +24,10 @@ from datetime import datetime
 
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
-PHISH_THRESHOLD = 0.60     
-NOT_PHISH_THRESHOLD = 0.40 
+PHISH_THRESHOLD = 0.75 
+NOT_PHISH_THRESHOLD = 0.35
 UNCERTAIN_LOW = 0.35
-UNCERTAIN_HIGH = 0.65
+UNCERTAIN_HIGH = 0.75
 
 def decide_label_from_prob(prob_phish):
     """
