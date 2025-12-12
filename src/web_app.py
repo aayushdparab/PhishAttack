@@ -1,4 +1,4 @@
-
+# --- pyzbar stub to avoid zbar import errors on Streamlit Cloud ---
 import sys, types
 _stub = types.ModuleType("pyzbar")
 _stub_pyzbar_pyzbar = types.ModuleType("pyzbar.pyzbar")
@@ -7,6 +7,7 @@ def _dummy_decode(*args, **kwargs):
 setattr(_stub_pyzbar_pyzbar, "decode", _dummy_decode)
 sys.modules["pyzbar"] = _stub
 sys.modules["pyzbar.pyzbar"] = _stub_pyzbar_pyzbar
+# --- END STUB ---
 
 import streamlit as st
 import pickle
@@ -17,20 +18,24 @@ import pandas as pd
 import os
 from pathlib import Path
 from PIL import Image
+import easyocr
 import cv2
-import requests
 import csv
 from datetime import datetime
-import io
 
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
-PHISH_THRESHOLD = 0.60
-NOT_PHISH_THRESHOLD = 0.40
+# ------ Decision thresholds (tunable) ------
+PHISH_THRESHOLD = 0.60     # p(phish) >= this -> phishing (high confidence)
+NOT_PHISH_THRESHOLD = 0.40 # p(phish) <= this -> not phishing (high confidence)
 UNCERTAIN_LOW = 0.35
 UNCERTAIN_HIGH = 0.65
 
 def decide_label_from_prob(prob_phish):
+    """
+    Decide label string + certainty based on probability of class 1 (phishing).
+    Returns (label_text, certainty_tag)
+    """
     if prob_phish is None:
         return ("Suspect / Manual Review", "low_confidence")
     if prob_phish >= PHISH_THRESHOLD:
@@ -41,6 +46,7 @@ def decide_label_from_prob(prob_phish):
         return ("Suspect / Manual Review", "uncertain")
     return ("Suspect / Manual Review", "low_confidence")
 
+# ---- URL helpers ----
 def extract_urls(text):
     url_pattern = re.compile(r"https?://\S+|www\.\S+")
     return url_pattern.findall(text or "")
@@ -53,40 +59,18 @@ def url_features(urls):
         len(set(urlparse(u).netloc for u in urls if "://" in u or u.startswith("www.")))
     ]
 
-OCR_API_KEY = None
-try:
-    OCR_API_KEY = st.secrets.get("OCR_API_KEY", None)
-except Exception:
-    OCR_API_KEY = None
+# ---- OCR reader (cached) ----
+@st.cache_resource
+def get_ocr_reader():
+    return easyocr.Reader(["en"], gpu=False)
+ocr_reader = get_ocr_reader()
 
-def ocr_image(pil_img):
-    """
-    Use OCR.space API to extract text from PIL image.
-    Requires OCR_API_KEY stored in Streamlit secrets or as environment var OCR_API_KEY.
-    Falls back to empty string if API key missing or call fails.
-    """
-    key = OCR_API_KEY or os.environ.get("OCR_API_KEY", None) or "helloworld"
-    buf = io.BytesIO()
-    pil_img.save(buf, format="PNG")
-    buf.seek(0)
-    url = "https://api.ocr.space/parse/image"
-    payload = {
-        "apikey": key,
-        "language": "eng",
-        "OCREngine": 2,
-    }
-    files = {"filename": ("image.png", buf, "image/png")}
-    try:
-        resp = requests.post(url, data=payload, files=files, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        parsed = data.get("ParsedResults")
-        if parsed and isinstance(parsed, list) and parsed[0].get("ParsedText"):
-            return parsed[0]["ParsedText"]
-        return ""
-    except Exception:
-        return ""
+def ocr_image(pil_image):
+    img_np = np.array(pil_image)
+    results = ocr_reader.readtext(img_np, detail=0)
+    return " ".join(results)
 
+# ---- QR decode (OpenCV) ----
 def decode_qr(pil_img):
     arr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     detector = cv2.QRCodeDetector()
@@ -107,9 +91,7 @@ def decode_qr(pil_img):
         except Exception:
             return []
 
-# ---------------------------
-# Model loader & paths
-# ---------------------------
+# ---- model loader ----
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR.parent / "models"
 MODEL_PATH = MODEL_DIR / "phishing_detector.pkl"
@@ -161,7 +143,7 @@ def try_load_models():
 try_load_models()
 
 if model is None or vectorizer is None:
-    st.warning("Model or vectorizer not found. Upload them below or place them in `models/` at repo root.")
+    st.warning("Model or vectorizer not found. Upload them below or put them in `models/` at repo root.")
     col1, col2 = st.columns(2)
     up_m = col1.file_uploader("Upload phishing_detector.pkl", type=["pkl"])
     up_v = col2.file_uploader("Upload vectorizer.pkl", type=["pkl"])
@@ -182,6 +164,7 @@ if model is None or vectorizer is None:
 else:
     st.success(f"Model loaded from: {loaded_from}")
 
+# ---- feedback saver ----
 def save_feedback(email_text, predicted_label, correct_label):
     data_dir = BASE_DIR.parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -200,6 +183,7 @@ def save_feedback(email_text, predicted_label, correct_label):
             writer.writeheader()
         writer.writerow(row)
 
+# ---- pad/truncate helper ----
 def pad_or_truncate(arr, target_dim):
     if target_dim is None:
         return arr
@@ -212,6 +196,7 @@ def pad_or_truncate(arr, target_dim):
     else:
         return arr[:, :target_dim]
 
+# ---- classify_text: returns pred_label (by prob>=0.5), prob_phish, urls ----
 def classify_text(text):
     if vectorizer is None or model is None:
         return 0, None, []
@@ -222,6 +207,7 @@ def classify_text(text):
     urls = extract_urls(text)
     X_urls = np.array(url_features(urls)).reshape(1, -1)
 
+    # metadata dims
     if metadata and isinstance(metadata, dict):
         text_dim = metadata.get("text_features") or metadata.get("tfidf_max_features") or X_text.shape[1]
         url_dim = metadata.get("url_features") or X_urls.shape[1]
@@ -241,24 +227,18 @@ def classify_text(text):
     try:
         if hasattr(model, "predict_proba"):
             p = model.predict_proba(X)
-            if hasattr(model, "classes_") and model.classes_ is not None:
-                classes = list(model.classes_)
-                if 1 in classes:
-                    idx = classes.index(1)
-                    prob_phish = float(p[0, idx])
-                else:
-                    if p.shape[1] == 2:
-                        prob_phish = float(p[0, 1])
-                    else:
-                        prob_phish = float(p[0].max())
+            # binary classifier: column 1 is prob of class 1
+            if p.shape[1] == 2:
+                prob_phish = float(p[0, 1])
             else:
-                if p.shape[1] == 2:
-                    prob_phish = float(p[0, 1])
-                else:
-                    prob_phish = float(p[0].max())
+                # fallback: take max or try index for label 1
+                prob_phish = float(p.max())
+        else:
+            prob_phish = None
     except Exception:
         prob_phish = None
 
+    # determine pred_label consistently from prob_phish if available, else model.predict
     if prob_phish is not None:
         pred_label = 1 if prob_phish >= 0.5 else 0
     else:
@@ -269,6 +249,7 @@ def classify_text(text):
 
     return pred_label, prob_phish, urls
 
+# ---- UI ----
 st.title("🛡️ PhishGuard AI — Email & Screenshot Phishing Detector")
 tab1, tab2 = st.tabs(["Upload Text", "Upload Image"])
 
@@ -313,8 +294,6 @@ with tab2:
         pil_img = Image.open(uploaded_img).convert("RGB")
         st.image(pil_img, caption="Uploaded Screenshot", use_column_width=True)
         extracted_text = ocr_image(pil_img)
-        if not extracted_text:
-            st.warning("OCR returned no text — either OCR API key missing or OCR failed. For cloud, set OCR_API_KEY in Streamlit Secrets.")
         st.text_area("OCR Extracted Text", extracted_text, height=200)
         qr_data = decode_qr(pil_img)
         if qr_data:
@@ -352,3 +331,4 @@ with tab2:
 
 st.markdown("---")
 st.write("Deny the Phish Attacks!!!!")
+
