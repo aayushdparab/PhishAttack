@@ -26,10 +26,10 @@ from datetime import datetime
 st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
 
 # ------ Decision thresholds (tunable) ------
-PHISH_THRESHOLD = 0.60     # p(phish) >= this -> phishing (high confidence)
-NOT_PHISH_THRESHOLD = 0.40 # p(phish) <= this -> not phishing (high confidence)
+PHISH_THRESHOLD = 0.75     # p(phish) >= this -> phishing (high confidence)
+NOT_PHISH_THRESHOLD = 0.35 # p(phish) <= this -> not phishing (high confidence)
 UNCERTAIN_LOW = 0.35
-UNCERTAIN_HIGH = 0.65
+UNCERTAIN_HIGH = 0.75
 
 def decide_label_from_prob(prob_phish):
     """
